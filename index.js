@@ -1,15 +1,16 @@
 const Connector = require('proxy-chain');
 const axios = require('axios');
 const net = require('net');
-const http = require('http');
+const cheerio = require('cheerio'); // HTML書き換え用
 require('dotenv').config();
 
 process.stdout.isTTY = true;
 
 const DATA_SOURCE = process.env.DATA_SOURCE || "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/refs/heads/main/socks5_proxies.txt";
 let allNodes = [];
+let requestCount = 0;
 
-// 生存確認 (0.1秒)
+// 爆速生存確認 (0.1秒)
 function isAlive(proxyUrl) {
     return new Promise((resolve) => {
         try {
@@ -36,23 +37,19 @@ async function syncList() {
 syncList();
 setInterval(syncList, 15 * 60 * 1000);
 
-// --- プロキシサーバーの本体設定 ---
+// --- プロキシサーバー設定 ---
 const bridge = new Connector.Server({
     port: process.env.PORT || 10000,
     host: '0.0.0.0',
     prepareRequestFunction: async ({ request }) => {
-        process.stdout.write(`[RELAY] ${request.url}\n`);
-        
-        // 有効なノードを3周リトライで探す
-        for (let loop = 1; loop <= 3; loop++) {
-            const testLimit = Math.min(allNodes.length, 50);
+        requestCount++;
+        // SwitchyOmegaからのリクエストを処理
+        for (let loop = 1; loop <= 2; loop++) {
+            const testLimit = Math.min(allNodes.length, 30);
             for (let i = 0; i < testLimit; i++) {
                 const targetNode = allNodes[i];
                 if (await isAlive(targetNode)) {
-                    return {
-                        upstreamProxyUrl: targetNode,
-                        requestHeaders: { ...request.headers, 'x-forwarded-for': undefined }
-                    };
+                    return { upstreamProxyUrl: targetNode, requestHeaders: { ...request.headers, 'x-forwarded-for': undefined } };
                 }
             }
         }
@@ -60,60 +57,79 @@ const bridge = new Connector.Server({
     },
 });
 
-// --- フロントエンドUI & URL直接指定の処理 ---
 bridge.listen(async () => {
-    process.stdout.write(`\n[READY] Port ${bridge.port}\n`);
+    process.stdout.write(`\n[READY] Hybrid Engine Active\n`);
 
-    // ProxyChainの内部HTTPサーバーに独自リクエストハンドラを追加
     bridge.server.on('request', async (req, res) => {
         const urlParam = req.url.startsWith('/') ? req.url.substring(1) : req.url;
 
-        // トップページ (フロントエンド)
+        // 1. ダッシュボード
         if (urlParam === "" || urlParam === "index.html") {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(`
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Secure Proxy Node</title>
-                    <style>
-                        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; background: #121212; color: white; margin: 0; }
-                        .container { background: #1e1e1e; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; width: 80%; max-width: 500px; }
-                        input { width: 100%; padding: 12px; margin: 10px 0; border-radius: 6px; border: 1px solid #333; background: #222; color: white; box-sizing: border-box; }
-                        button { background: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; }
-                        button:hover { background: #0056b3; }
-                        .status { margin-top: 20px; font-size: 0.9rem; color: #888; }
-                        .badge { background: #28a745; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; }
-                    </style>
-                </head>
-                <body>
-                    <div class="container">
-                        <h1>Proxy Node <span class="badge">Online</span></h1>
-                        <p>URLを入力して匿名閲覧を開始:</p>
-                        <input type="text" id="target" placeholder="https://example.com">
-                        <button onclick="go()">Go Anonymously</button>
-                        <div class="status">
-                            Nodes Active: ${allNodes.length} | IP Rotation: Enabled
-                        </div>
-                    </div>
-                    <script>
-                        function go() {
-                            const val = document.getElementById('target').value;
-                            if (val) window.location.href = "/" + val;
-                        }
-                    </script>
-                </body>
-                </html>
-            `);
+            res.end(getDashboardHTML());
             return;
         }
 
-        // URL直接指定 (例: /https://google.com) の簡易転送
+        // 2. フルWebプロキシ (リンク書き換えエンジン)
         if (urlParam.startsWith('http')) {
-            process.stdout.write(`[URL-DIRECT] Routing to: ${urlParam}\n`);
-            res.writeHead(302, { 'Location': urlParam }); // 実際にはここで中継処理を行うが、Render/Nodeの制限上リダイレクトが最も安定
-            res.end();
+            try {
+                const targetUrl = new URL(urlParam);
+                process.stdout.write(`[WEB-PROXY] Fetching: ${targetUrl.href}\n`);
+
+                const response = await axios.get(targetUrl.href, {
+                    responseType: 'text',
+                    headers: { 'User-Agent': req.headers['user-agent'] }
+                });
+
+                // HTML内のリンクを "/https://..." 形式に書き換える
+                const $ = cheerio.load(response.data);
+                $('a, link, script, img').each((i, el) => {
+                    const attr = $(el).attr('href') ? 'href' : 'src';
+                    const originalVal = $(el).attr(attr);
+                    if (originalVal && !originalVal.startsWith('data:')) {
+                        try {
+                            const absoluteUrl = new URL(originalVal, targetUrl.href).href;
+                            $(el).attr(attr, '/' + absoluteUrl);
+                        } catch (e) {}
+                    }
+                });
+
+                res.writeHead(200, { 'Content-Type': response.headers['content-type'] });
+                res.end($.html());
+            } catch (e) {
+                res.writeHead(500);
+                res.end("Proxy Error: " + e.message);
+            }
             return;
         }
     });
 });
+
+function getDashboardHTML() {
+    return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Hybrid Proxy Dashboard</title>
+        <style>
+            body { background: #0a0a0a; color: #00d4ff; font-family: monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+            .box { border: 2px solid #00d4ff; padding: 40px; border-radius: 20px; box-shadow: 0 0 20px #00d4ff; text-align: center; }
+            input { width: 300px; padding: 10px; border: 1px solid #00d4ff; background: #000; color: #fff; border-radius: 5px; }
+            button { padding: 10px 20px; background: #00d4ff; color: #000; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; }
+            .status { margin-top: 20px; font-size: 0.8rem; opacity: 0.7; }
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h1>HYBRID PROXY NODE</h1>
+            <p>Enter URL to start FULL PROXY session:</p>
+            <input type="text" id="url" placeholder="https://example.com">
+            <button onclick="location.href='/' + document.getElementById('url').value">GO</button>
+            <div class="status">
+                Nodes: ${allNodes.length} | Total Hits: ${requestCount}<br>
+                Mode: SwitchyOmega (443) + Direct Web Proxy
+            </div>
+        </div>
+    </body>
+    </html>`;
+}
