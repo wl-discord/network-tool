@@ -1,10 +1,13 @@
-name: Unzip All Zip Files
+name: Unzip and Auto Commit
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+
+permissions:
+  contents: write   # ← pushするために必須
 
 jobs:
   unzip:
@@ -13,6 +16,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Install unzip (if needed)
         run: |
@@ -21,13 +26,24 @@ jobs:
             sudo apt-get install -y unzip
           fi
 
-      - name: Find and unzip all zip files
+      - name: Unzip all zip files
         run: |
-          mkdir -p extracted
+          set -e
           find . -type f -name "*.zip" | while read zipfile; do
             echo "Unzipping $zipfile ..."
-            unzip -o "$zipfile" -d "extracted/$(dirname "$zipfile")"
+            unzip -o "$zipfile" -d "$(dirname "$zipfile")"
           done
 
-      - name: Show extracted files
-        run: ls -R extracted
+      - name: Commit changes if any
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Auto unzip: extracted zip files"
+            git push
+          fi
