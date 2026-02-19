@@ -3,16 +3,17 @@ const axios = require('axios');
 const net = require('net');
 require('dotenv').config();
 
-// ログ出力設定
+// ログ出力を即時反映
 process.stdout.isTTY = true;
 
-const DATA_SOURCE = process.env.DATA_SOURCE || "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/refs/heads/main/socks5_proxies.txt";
+const DATA_SOURCE = process.env.DATA_SOURCE;
 let allNodes = [];
 
-// 0.1秒の高速生存確認
+// 生存確認 (0.1秒)
 function isAlive(proxyUrl) {
     return new Promise((resolve) => {
         try {
+            // "socks5://host:port" から host と port を取り出す
             const url = proxyUrl.replace('socks5://', '');
             const [host, port] = url.split(':');
             const socket = new net.Socket();
@@ -27,13 +28,18 @@ function isAlive(proxyUrl) {
     });
 }
 
-// プロキシリスト取得
+// リスト更新 (socks5:// が最初からついている前提でフィルタリング)
 async function syncList() {
     try {
         const res = await axios.get(DATA_SOURCE);
-        allNodes = [...new Set(res.data.split('\n').map(s => s.trim()).filter(s => s.startsWith('socks5://')))];
+        // 空行を除去し、重複を排除
+        allNodes = [...new Set(res.data.split('\n')
+            .map(s => s.trim())
+            .filter(s => s.startsWith('socks5://')))];
         process.stdout.write(`\n[SYSTEM] Nodes Loaded: ${allNodes.length}\n`);
-    } catch (e) { process.stdout.write(`\n[ERROR] Sync failed\n`); }
+    } catch (e) {
+        process.stdout.write(`\n[ERROR] Failed to fetch list: ${e.message}\n`);
+    }
 }
 syncList();
 setInterval(syncList, 15 * 60 * 1000);
@@ -42,25 +48,24 @@ const bridge = new Connector.Server({
     port: process.env.PORT || 10000,
     host: '0.0.0.0',
     prepareRequestFunction: async ({ request }) => {
-        // Socket.IOのリクエスト（WebSocket）を検知
-        const isSocketIO = request.url.includes('socket.io');
-        if (isSocketIO) {
-            process.stdout.write(`[CHAT-WS] Active Socket.IO Connection\n`);
+        // chochatのSocket.IO接続をログで確認
+        if (request.url.includes('socket.io')) {
+            process.stdout.write(`[CHAT-SESSION] WebSocket packet relayed\n`);
         }
 
-        // リストから生きているプロキシを3周リトライで探す
+        // リストの上から順に、生きている爆速プロキシを探す
         for (let loop = 1; loop <= 3; loop++) {
-            const testLimit = Math.min(allNodes.length, 50);
-            for (let i = 0; i < testLimit; i++) {
-                const targetNode = allNodes[i];
+            const scanLimit = Math.min(allNodes.length, 50);
+            for (let i = 0; i < scanLimit; i++) {
+                const targetNode = allNodes[i]; // ここに既に socks5:// が入っている
+                
                 if (await isAlive(targetNode)) {
                     return {
                         upstreamProxyUrl: targetNode,
                         requestHeaders: {
                             ...request.headers,
                             'x-forwarded-for': undefined,
-                            'via': undefined,
-                            'connection': 'keep-alive' // Socket.IO維持のために重要
+                            'connection': 'keep-alive' // チャットの切断防止
                         }
                     };
                 }
@@ -71,5 +76,5 @@ const bridge = new Connector.Server({
 });
 
 bridge.listen(() => {
-    process.stdout.write(`\n[READY] chochat Optimized Proxy Running\n`);
+    process.stdout.write(`\n[READY] chochat Proxy started. DataSource: ${DATA_SOURCE}\n`);
 });
