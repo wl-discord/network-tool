@@ -1,0 +1,17 @@
+name: Unzip and Clean
+
+on:
+  workflow_dispatch:  # 手動実行（必要に応じて push などに変更）
+
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Unzip file
+        run: |
+          unzip hello-world-main.zip
+          rm hello-world-main.zip
