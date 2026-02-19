@@ -6,28 +6,32 @@ require('dotenv').config();
 const DATA_SOURCE = process.env.DATA_SOURCE;
 let allNodes = [];
 
-// 0.1秒タイムアウトの生存確認関数
+// 0.1秒の高速生存確認
 function isAlive(proxyUrl) {
     return new Promise((resolve) => {
-        const url = proxyUrl.replace('socks5://', '');
-        const [host, port] = url.split(':');
-        const socket = new net.Socket();
-        
-        socket.setTimeout(100); // 0.1秒
+        try {
+            const url = proxyUrl.replace('socks5://', '');
+            const [host, port] = url.split(':');
+            const socket = new net.Socket();
+            
+            socket.setTimeout(100); // 0.1秒足切り
 
-        socket.on('connect', () => {
-            socket.destroy();
-            resolve(true);
-        });
+            socket.on('connect', () => {
+                socket.destroy();
+                resolve(true);
+            });
 
-        const fail = () => {
-            socket.destroy();
+            const fail = () => {
+                socket.destroy();
+                resolve(false);
+            };
+
+            socket.on('timeout', fail);
+            socket.on('error', fail);
+            socket.connect(port, host);
+        } catch (e) {
             resolve(false);
-        };
-
-        socket.on('timeout', fail);
-        socket.on('error', fail);
-        socket.connect(port, host);
+        }
     });
 }
 
@@ -35,12 +39,13 @@ function isAlive(proxyUrl) {
 async function syncList() {
     try {
         const res = await axios.get(DATA_SOURCE);
-        allNodes = res.data.split('\n')
+        // 重複削除と整形
+        allNodes = [...new Set(res.data.split('\n')
             .map(s => s.trim())
-            .filter(s => s.length > 0);
-        console.log(`List synced: ${allNodes.length} nodes.`);
+            .filter(s => s.startsWith('socks5://')))];
+        console.log(`[System] List updated: ${allNodes.length} nodes available.`);
     } catch (e) {
-        console.error('Sync failed.');
+        console.error('[Error] Failed to fetch proxy list.');
     }
 }
 syncList();
@@ -49,40 +54,41 @@ setInterval(syncList, 15 * 60 * 1000);
 const bridge = new Connector.Server({
     port: process.env.PORT || 10000,
     host: '0.0.0.0',
+    // SwitchyOmegaからの接続を処理
     prepareRequestFunction: async ({ request }) => {
         if (allNodes.length === 0) return {};
 
-        // 最大3周（ループ）回す
+        // 最大3周リトライ
         for (let loop = 1; loop <= 3; loop++) {
-            console.log(`Loop ${loop}: Searching for an active node...`);
+            // 無料プロキシはリストの下の方は死んでいることが多いので、
+            // 効率化のために上位100件程度をスキャン
+            const testLimit = Math.min(allNodes.length, 100);
             
-            // リストの上から順に試行
-            for (let i = 0; i < allNodes.length; i++) {
+            for (let i = 0; i < testLimit; i++) {
                 const targetNode = allNodes[i];
                 
-                // 接続テスト
-                const success = await isAlive(targetNode);
-                
-                if (success) {
-                    console.log(`Success! Using node: ${targetNode}`);
+                if (await isAlive(targetNode)) {
+                    // 生存確認が取れたら、ブラウザ側のリクエストを通す
                     return {
                         upstreamProxyUrl: targetNode,
                         requestHeaders: {
                             ...request.headers,
                             'x-forwarded-for': undefined,
-                            'via': undefined
+                            'via': undefined,
+                            'forwarded': undefined,
+                            'connection': 'keep-alive'
                         }
                     };
                 }
             }
-            console.log(`Loop ${loop} failed: No active nodes found.`);
+            // 1周して見つからなければ、少し待って次へ（サーバーの負荷軽減）
+            await new Promise(r => setTimeout(r, 500));
         }
 
-        console.error("All 3 loops failed. Giving up.");
-        return {}; // 3回全滅した場合は直結または拒否
+        return {}; // 3周して全滅なら直結（エラー回避）
     },
 });
 
 bridge.listen(() => {
-    console.log(`Retry-heavy relay initialized. Timeout: 0.1s`);
+    console.log(`[Ready] SwitchyOmega-optimized Proxy on port ${bridge.port}`);
 });
