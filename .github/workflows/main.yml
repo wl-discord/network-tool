@@ -1,7 +1,10 @@
-name: Unzip and Clean
+name: Unzip All Zip Files
 
 on:
-  workflow_dispatch:  # 手動実行（必要に応じて push などに変更）
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   unzip:
@@ -11,7 +14,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unzip file
+      - name: Install unzip (if needed)
         run: |
-          unzip hello-world-main.zip
-          rm hello-world-main.zip
+          if ! command -v unzip &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y unzip
+          fi
+
+      - name: Find and unzip all zip files
+        run: |
+          mkdir -p extracted
+          find . -type f -name "*.zip" | while read zipfile; do
+            echo "Unzipping $zipfile ..."
+            unzip -o "$zipfile" -d "extracted/$(dirname "$zipfile")"
+          done
+
+      - name: Show extracted files
+        run: ls -R extracted
