@@ -1,35 +1,88 @@
+const Connector = require('proxy-chain');
 const axios = require('axios');
+const net = require('net');
 require('dotenv').config();
 
-// ライブラリ名を隠して読み込み
-const Library = require('proxy-chain');
+const DATA_SOURCE = process.env.DATA_SOURCE;
+let allNodes = [];
 
-const URL = process.env.DATA_SOURCE;
-let list = [];
+// 0.1秒タイムアウトの生存確認関数
+function isAlive(proxyUrl) {
+    return new Promise((resolve) => {
+        const url = proxyUrl.replace('socks5://', '');
+        const [host, port] = url.split(':');
+        const socket = new net.Socket();
+        
+        socket.setTimeout(100); // 0.1秒
 
-async function update() {
-    try {
-        const res = await axios.get(URL);
-        list = res.data.split('\n').filter(l => l.includes('socks5://'));
-    } catch (e) {}
-}
-update();
-setInterval(update, 1000 * 60 * 30);
+        socket.on('connect', () => {
+            socket.destroy();
+            resolve(true);
+        });
 
-const app = new Library.Server({
-    port: process.env.PORT || 8080,
-    host: '0.0.0.0',
-    prepareRequestFunction: () => {
-        const upstream = list[Math.floor(Math.random() * list.length)];
-        return {
-            upstreamProxyUrl: upstream,
-            requestHeaders: {
-                'x-forwarded-for': undefined,
-                'via': undefined,
-                'forwarded': undefined
-            }
+        const fail = () => {
+            socket.destroy();
+            resolve(false);
         };
+
+        socket.on('timeout', fail);
+        socket.on('error', fail);
+        socket.connect(port, host);
+    });
+}
+
+// リスト取得
+async function syncList() {
+    try {
+        const res = await axios.get(DATA_SOURCE);
+        allNodes = res.data.split('\n')
+            .map(s => s.trim())
+            .filter(s => s.length > 0);
+        console.log(`List synced: ${allNodes.length} nodes.`);
+    } catch (e) {
+        console.error('Sync failed.');
     }
+}
+syncList();
+setInterval(syncList, 15 * 60 * 1000);
+
+const bridge = new Connector.Server({
+    port: process.env.PORT || 10000,
+    host: '0.0.0.0',
+    prepareRequestFunction: async ({ request }) => {
+        if (allNodes.length === 0) return {};
+
+        // 最大3周（ループ）回す
+        for (let loop = 1; loop <= 3; loop++) {
+            console.log(`Loop ${loop}: Searching for an active node...`);
+            
+            // リストの上から順に試行
+            for (let i = 0; i < allNodes.length; i++) {
+                const targetNode = allNodes[i];
+                
+                // 接続テスト
+                const success = await isAlive(targetNode);
+                
+                if (success) {
+                    console.log(`Success! Using node: ${targetNode}`);
+                    return {
+                        upstreamProxyUrl: targetNode,
+                        requestHeaders: {
+                            ...request.headers,
+                            'x-forwarded-for': undefined,
+                            'via': undefined
+                        }
+                    };
+                }
+            }
+            console.log(`Loop ${loop} failed: No active nodes found.`);
+        }
+
+        console.error("All 3 loops failed. Giving up.");
+        return {}; // 3回全滅した場合は直結または拒否
+    },
 });
 
-app.listen(() => console.log(`Service ready` || app.port));
+bridge.listen(() => {
+    console.log(`Retry-heavy relay initialized. Timeout: 0.1s`);
+});
